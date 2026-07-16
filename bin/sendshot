@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-VERSION="0.2.1"
+VERSION="0.2.2"
 
 CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/sendshot"
 CONFIG_FILE="$CONFIG_DIR/config"
@@ -591,7 +591,7 @@ case "$directory" in
     directory="$HOME"
     ;;
   "~/"*)
-    directory="$HOME/${directory#~/}"
+    directory="$HOME/${directory:2}"
     ;;
 esac
 
@@ -601,7 +601,7 @@ pwd -P
 REMOTE_SCRIPT
 }
 
-send_image() {
+send_image() (
   load_config
 
   [[ -n "$REMOTE_HOST" ]] || die "not configured; run: sendshot config"
@@ -638,7 +638,7 @@ send_image() {
 
   copy_to_clipboard "$remote_path" || true
   printf '%s\n' "$remote_path"
-}
+)
 
 show_config() {
   load_config
