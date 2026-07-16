@@ -1,21 +1,35 @@
 # sendshot
 
-把本机剪贴板中的截图上传到远程 EC2，并把远程绝对路径复制回本机剪贴板。
+把**本机剪贴板中的截图或图片**上传到**远程 Linux 工作机**，再把该文件的远程绝对路径复制回本机剪贴板。
 
-主要适用于：
+它解决的是「本机桌面与远程开发环境不共享文件系统」的问题：截图在本机生成，Codex、Claude Code 或普通 SSH 终端在服务器上使用这张图。
 
-- 本机：Ubuntu 24.04 桌面版
-- 远程：EC2 / Linux 服务器
-- Agent：Codex、Claude Code 或普通 SSH 终端
+```text
+本机截图 → sendshot（本机运行） → SSH/SCP → 远程 Linux 文件
+                                                ↓
+                                  /home/user/tmp_images/xxx.png
+                                                ↓
+                            粘贴给 Codex、Claude Code 或 SSH 终端
+```
 
-## 支持环境
+Ubuntu 24.04 桌面版与 EC2 是已验证的常用组合，不是项目的定位或唯一使用方式；文档以下述「本机 / 远程主机 / 使用终端」三种角色组织。
 
-| 本机环境 | 剪贴板实现 |
-|---|---|
-| Ubuntu Wayland | `wl-paste` / `wl-copy` |
-| Ubuntu X11 | `xclip` |
-| WSL | Windows PowerShell |
-| macOS | `pngpaste` / `osascript` |
+## 角色与环境
+
+| 角色 | 需要的环境 | 说明 |
+| --- | --- | --- |
+| 本机 | Linux 桌面（已验证 Ubuntu 24.04） | 负责读取截图和复制返回路径。Wayland 使用 `wl-clipboard`，X11 使用 `xclip`。 |
+| 远程主机 | EC2 或任意可 SSH 的 Linux 服务器 | 需要 `ssh`、`scp`、`bash`，以及一个可写入的目标目录。 |
+| 使用终端 | Codex、Claude Code 或普通 SSH 终端 | 在同一台远程主机上接收并使用图片的绝对路径。 |
+
+也支持从 WSL（Windows PowerShell 剪贴板）和 macOS（`pngpaste` 或 `osascript`）上传；这些是额外兼容场景。安装器仅会在 apt 系 Linux 上自动安装缺失的剪贴板和 SSH 依赖。
+
+## 开始前
+
+- 在本机安装并运行 `sendshot`，不要在只负责存图的远程服务器上安装它。
+- 本机需要网络、`ssh`、`scp`，以及能读取图片剪贴板的工具。
+- 远程主机需要允许 SSH 登录；所用账号必须能在目标目录创建文件。EC2 只是其中一个例子。
+- 先确认你可以从本机正常执行 `ssh <user>@<host>`。使用 `.pem` 私钥时，通常还需要 `chmod 600 ~/.ssh/your-key.pem`。
 
 ## 一行安装
 
@@ -23,23 +37,18 @@
 curl -fsSL https://raw.githubusercontent.com/hinson0/sendshot/main/install.sh | bash
 ```
 
-安装器会交互式完成：
+安装器会将 `sendshot` 放到 `~/.local/bin/sendshot`，并按需完成以下操作：
 
-1. 检查并安装 Ubuntu 依赖。
-2. 安装 `sendshot` 到 `~/.local/bin/sendshot`。
-3. 把 `~/.local/bin` 加入 PATH。
-4. 询问是否绑定 `Ctrl+G`。
-5. 交互式配置 EC2。
+- 在 apt 系 Linux 上安装缺失的 `openssh-client`、`wl-clipboard` 或 `xclip`。
+- 将 `~/.local/bin` 写入当前 shell 的启动文件。
+- 询问是否启用 Bash/Zsh 的 `Ctrl+G` 快捷键。
+- 询问远程 Linux 目标的 SSH 配置。
 
-安装后重新打开终端，或者执行：
+完成后重新打开终端；也可以按你的 shell 执行：
 
 ```bash
 source ~/.zshrc
-```
-
-使用 bash 时：
-
-```bash
+# 或
 source ~/.bashrc
 ```
 
