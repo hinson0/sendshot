@@ -1,10 +1,17 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-VERSION="0.1.0"
+VERSION="0.2.0"
 
 CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/sendshot"
 CONFIG_FILE="$CONFIG_DIR/config"
+
+UPDATE_REPOSITORY="${SENDSHOT_UPDATE_REPOSITORY:-hinson0/sendshot}"
+UPDATE_BRANCH="${SENDSHOT_UPDATE_BRANCH:-main}"
+UPDATE_RAW_BASE="${SENDSHOT_UPDATE_RAW_BASE:-https://raw.githubusercontent.com/$UPDATE_REPOSITORY/$UPDATE_BRANCH}"
+UPDATE_CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/sendshot"
+UPDATE_CHECK_FILE="$UPDATE_CACHE_DIR/last-update-check"
+UPDATE_INTERVAL_SECONDS="${SENDSHOT_UPDATE_INTERVAL_SECONDS:-86400}"
 
 log() {
   printf 'sendshot: %s\n' "$*" >&2
@@ -81,6 +88,234 @@ ask_yes_no() {
   fi
 
   [[ "$answer" =~ ^[Yy]([Ee][Ss])?$ ]]
+}
+
+fetch_url() {
+  local url="$1"
+  local destination="${2:-}"
+
+  if command_exists curl; then
+    if [[ -n "$destination" ]]; then
+      curl -fsSL \
+        --connect-timeout 5 \
+        --max-time 30 \
+        "$url" \
+        -o "$destination"
+    else
+      curl -fsSL \
+        --connect-timeout 5 \
+        --max-time 30 \
+        "$url"
+    fi
+  elif command_exists wget; then
+    if [[ -n "$destination" ]]; then
+      wget -q --timeout=30 -O "$destination" "$url"
+    else
+      wget -q --timeout=30 -O- "$url"
+    fi
+  else
+    die "curl or wget is required for updates"
+  fi
+}
+
+extract_version_from_file() {
+  local file="$1"
+  sed -nE 's/^VERSION="([^"]+)".*/\1/p' "$file" | head -n 1
+}
+
+version_is_newer() {
+  local latest="${1%%[-+]*}"
+  local current="${2%%[-+]*}"
+  local latest_major latest_minor latest_patch
+  local current_major current_minor current_patch
+
+  IFS=. read -r latest_major latest_minor latest_patch <<<"$latest"
+  IFS=. read -r current_major current_minor current_patch <<<"$current"
+
+  latest_major="${latest_major:-0}"
+  latest_minor="${latest_minor:-0}"
+  latest_patch="${latest_patch:-0}"
+  current_major="${current_major:-0}"
+  current_minor="${current_minor:-0}"
+  current_patch="${current_patch:-0}"
+
+  [[ "$latest_major" =~ ^[0-9]+$ ]] || return 1
+  [[ "$latest_minor" =~ ^[0-9]+$ ]] || return 1
+  [[ "$latest_patch" =~ ^[0-9]+$ ]] || return 1
+  [[ "$current_major" =~ ^[0-9]+$ ]] || return 1
+  [[ "$current_minor" =~ ^[0-9]+$ ]] || return 1
+  [[ "$current_patch" =~ ^[0-9]+$ ]] || return 1
+
+  ((latest_major > current_major)) && return 0
+  ((latest_major < current_major)) && return 1
+
+  ((latest_minor > current_minor)) && return 0
+  ((latest_minor < current_minor)) && return 1
+
+  ((latest_patch > current_patch))
+}
+
+resolve_self_path() {
+  local path="${BASH_SOURCE[0]}"
+
+  if [[ "$path" != /* ]]; then
+    path="$(command -v "$path" 2>/dev/null || printf '%s' "$path")"
+  fi
+
+  local directory
+  directory="$(cd -P "$(dirname "$path")" && pwd)"
+
+  printf '%s/%s\n' "$directory" "$(basename "$path")"
+}
+
+record_update_check() {
+  mkdir -p "$UPDATE_CACHE_DIR"
+  date +%s >"$UPDATE_CHECK_FILE"
+}
+
+should_check_for_update() {
+  [[ "${SENDSHOT_NO_UPDATE_CHECK:-0}" != "1" ]] || return 1
+  [[ "$UPDATE_INTERVAL_SECONDS" =~ ^[0-9]+$ ]] || return 1
+
+  local now last_check=0
+  now="$(date +%s)"
+
+  if [[ -f "$UPDATE_CHECK_FILE" ]]; then
+    read -r last_check <"$UPDATE_CHECK_FILE" || last_check=0
+  fi
+
+  [[ "$last_check" =~ ^[0-9]+$ ]] || last_check=0
+
+  ((now - last_check >= UPDATE_INTERVAL_SECONDS))
+}
+
+download_latest_source() {
+  local destination="$1"
+
+  fetch_url "$UPDATE_RAW_BASE/bin/sendshot" "$destination" ||
+    return 1
+
+  [[ -s "$destination" ]] || return 1
+  bash -n "$destination" || return 1
+}
+
+install_update_file() {
+  local source_file="$1"
+  local target_file="$2"
+
+  [[ -w "$target_file" ]] ||
+    die "cannot update $target_file; check its ownership and permissions"
+
+  install -m 0755 "$source_file" "$target_file"
+}
+
+perform_update() {
+  local force="${1:-0}"
+  local temporary_file latest_version self_path
+
+  temporary_file="$(mktemp "${TMPDIR:-/tmp}/sendshot-update.XXXXXX")"
+
+  if ! download_latest_source "$temporary_file"; then
+    rm -f "$temporary_file"
+    die "failed to download or validate the latest version"
+  fi
+
+  latest_version="$(extract_version_from_file "$temporary_file")"
+
+  if [[ -z "$latest_version" ]]; then
+    rm -f "$temporary_file"
+    die "latest source does not contain a VERSION"
+  fi
+
+  if [[ "$force" != "1" ]] && ! version_is_newer "$latest_version" "$VERSION"; then
+    rm -f "$temporary_file"
+    record_update_check
+    log "already up to date: $VERSION"
+    return 0
+  fi
+
+  self_path="$(resolve_self_path)"
+  install_update_file "$temporary_file" "$self_path"
+  rm -f "$temporary_file"
+  record_update_check
+
+  log "updated: $VERSION -> $latest_version"
+}
+
+check_update_interactive() {
+  local mode="${1:-automatic}"
+  shift || true
+
+  local temporary_file latest_version self_path
+
+  temporary_file="$(mktemp "${TMPDIR:-/tmp}/sendshot-check.XXXXXX")"
+
+  # 无网络时不影响 sendshot 的正常上传。
+  if ! download_latest_source "$temporary_file"; then
+    rm -f "$temporary_file"
+
+    if [[ "$mode" == "manual" ]]; then
+      log "unable to check for updates"
+      return 1
+    fi
+
+    return 0
+  fi
+
+  latest_version="$(extract_version_from_file "$temporary_file")"
+  record_update_check
+
+  if [[ -z "$latest_version" ]]; then
+    rm -f "$temporary_file"
+
+    if [[ "$mode" == "manual" ]]; then
+      log "latest source does not contain a VERSION"
+      return 1
+    fi
+
+    return 0
+  fi
+
+  if ! version_is_newer "$latest_version" "$VERSION"; then
+    rm -f "$temporary_file"
+
+    if [[ "$mode" == "manual" ]]; then
+      log "already up to date: $VERSION"
+    fi
+
+    return 0
+  fi
+
+  log "update available: $VERSION -> $latest_version"
+
+  # 非交互环境只提示，不阻塞，也不自动覆盖。
+  if [[ ! -r /dev/tty || "${SENDSHOT_NON_INTERACTIVE:-0}" == "1" ]]; then
+    rm -f "$temporary_file"
+    log "run: sendshot update"
+    return 0
+  fi
+
+  if ! ask_yes_no "Update now?" yes; then
+    rm -f "$temporary_file"
+    log "update skipped"
+    return 0
+  fi
+
+  self_path="$(resolve_self_path)"
+  install_update_file "$temporary_file" "$self_path"
+  rm -f "$temporary_file"
+
+  log "updated: $VERSION -> $latest_version"
+
+  # 立即使用新版本继续执行用户原本输入的命令。
+  if (($# > 0)); then
+    SENDSHOT_NO_UPDATE_CHECK=1 exec "$self_path" "$@"
+  fi
+}
+
+maybe_check_for_update() {
+  should_check_for_update || return 0
+  check_update_interactive automatic "$@"
 }
 
 load_config() {
@@ -476,6 +711,9 @@ Usage:
   sendshot show-config     Display current configuration
   sendshot test            Test SSH connection
   sendshot doctor          Check local dependencies and remote connection
+  sendshot check-update    Check for a new version and ask whether to update
+  sendshot update          Download and install the latest version
+  sendshot update --force  Reinstall the remote version even if unchanged
   sendshot version         Display version
   sendshot help            Display this help
 
@@ -498,27 +736,44 @@ EOF
 }
 
 main() {
-  case "${1:-send}" in
-    send)
-      send_image
+  local command="${1:-send}"
+
+  case "$command" in
+    update)
+      if [[ "${2:-}" == "--force" ]]; then
+        perform_update 1
+      else
+        perform_update 0
+      fi
       ;;
-    config)
-      configure
-      ;;
-    show-config)
-      show_config
-      ;;
-    test)
-      test_connection
-      ;;
-    doctor)
-      doctor
+    check-update)
+      check_update_interactive manual
       ;;
     version|--version|-v)
       printf 'sendshot %s\n' "$VERSION"
       ;;
     help|--help|-h)
       usage
+      ;;
+    send)
+      maybe_check_for_update "$@"
+      send_image
+      ;;
+    config)
+      maybe_check_for_update "$@"
+      configure
+      ;;
+    show-config)
+      maybe_check_for_update "$@"
+      show_config
+      ;;
+    test)
+      maybe_check_for_update "$@"
+      test_connection
+      ;;
+    doctor)
+      maybe_check_for_update "$@"
+      doctor
       ;;
     *)
       usage >&2
