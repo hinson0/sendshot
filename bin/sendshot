@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-VERSION="0.2.0"
+VERSION="0.2.1"
 
 CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/sendshot"
 CONFIG_FILE="$CONFIG_DIR/config"
