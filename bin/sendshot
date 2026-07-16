@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-VERSION="0.2.2"
+VERSION="0.2.3"
 
 CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/sendshot"
 CONFIG_FILE="$CONFIG_DIR/config"
@@ -209,6 +209,81 @@ install_update_file() {
   install -m 0755 "$source_file" "$target_file"
 }
 
+download_shell_integration() {
+  local shell_name="$1"
+  local destination="$2"
+
+  fetch_url "$UPDATE_RAW_BASE/shell/sendshot.$shell_name" "$destination" ||
+    return 1
+
+  [[ -s "$destination" ]] || return 1
+
+  case "$shell_name" in
+    zsh)
+      if command_exists zsh; then
+        zsh -n "$destination" || return 1
+      fi
+      ;;
+    bash)
+      bash -n "$destination" || return 1
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+refresh_shell_integrations() {
+  local shell_name target temporary_file
+  local refreshed=0
+
+  mkdir -p "$CONFIG_DIR"
+
+  for shell_name in zsh bash; do
+    target="$CONFIG_DIR/sendshot.$shell_name"
+
+    # Refresh integrations that are already installed.
+    [[ -f "$target" ]] || continue
+
+    temporary_file="$(mktemp "${TMPDIR:-/tmp}/sendshot-shell.XXXXXX")"
+
+    if download_shell_integration "$shell_name" "$temporary_file"; then
+      install -m 0644 "$temporary_file" "$target"
+      log "updated shell integration: $target"
+      refreshed=1
+    else
+      log "warning: failed to update shell integration: $shell_name"
+    fi
+
+    rm -f "$temporary_file"
+  done
+
+  # When called explicitly and no integration exists yet, install one for the
+  # user's current shell. The rc source block is normally created by install.sh.
+  if ((refreshed == 0)); then
+    case "${SHELL:-}" in
+      */zsh) shell_name="zsh" ;;
+      */bash) shell_name="bash" ;;
+      *)
+        log "warning: only bash and zsh hotkeys are supported"
+        return 1
+        ;;
+    esac
+
+    target="$CONFIG_DIR/sendshot.$shell_name"
+    temporary_file="$(mktemp "${TMPDIR:-/tmp}/sendshot-shell.XXXXXX")"
+
+    if ! download_shell_integration "$shell_name" "$temporary_file"; then
+      rm -f "$temporary_file"
+      die "failed to download the $shell_name integration"
+    fi
+
+    install -m 0644 "$temporary_file" "$target"
+    rm -f "$temporary_file"
+    log "installed shell integration: $target"
+  fi
+}
+
 perform_update() {
   local force="${1:-0}"
   local temporary_file latest_version self_path
@@ -237,6 +312,7 @@ perform_update() {
   self_path="$(resolve_self_path)"
   install_update_file "$temporary_file" "$self_path"
   rm -f "$temporary_file"
+  refresh_shell_integrations || true
   record_update_check
 
   log "updated: $VERSION -> $latest_version"
@@ -304,6 +380,7 @@ check_update_interactive() {
   self_path="$(resolve_self_path)"
   install_update_file "$temporary_file" "$self_path"
   rm -f "$temporary_file"
+  refresh_shell_integrations || true
 
   log "updated: $VERSION -> $latest_version"
 
@@ -560,15 +637,18 @@ copy_to_clipboard() {
   local value="$1"
 
   if command_exists clip.exe; then
-    printf '%s' "$value" | clip.exe
+    printf '%s' "$value" | clip.exe >/dev/null 2>&1
   elif command_exists pbcopy; then
-    printf '%s' "$value" | pbcopy
+    printf '%s' "$value" | pbcopy >/dev/null 2>&1
   elif command_exists wl-copy &&
     { [[ -n "${WAYLAND_DISPLAY:-}" ]] || [[ "${XDG_SESSION_TYPE:-}" == "wayland" ]]; }; then
-    printf '%s' "$value" | wl-copy
+    printf '%s' "$value" | wl-copy >/dev/null 2>&1
   elif command_exists xclip &&
     { [[ -n "${DISPLAY:-}" ]] || [[ "${XDG_SESSION_TYPE:-}" == "x11" ]]; }; then
-    printf '%s' "$value" | xclip -selection clipboard
+    # xclip may fork a background selection owner. Redirect its output so the
+    # process cannot keep a ZLE command-capture pipe open.
+    printf '%s' "$value" |
+      xclip -selection clipboard -in >/dev/null 2>&1
   else
     log "warning: could not copy remote path back to clipboard"
     return 1
@@ -714,6 +794,7 @@ Usage:
   sendshot check-update    Check for a new version and ask whether to update
   sendshot update          Download and install the latest version
   sendshot update --force  Reinstall the remote version even if unchanged
+  sendshot install-hotkey  Install or refresh Ctrl+G shell integration
   sendshot version         Display version
   sendshot help            Display this help
 
@@ -748,6 +829,9 @@ main() {
       ;;
     check-update)
       check_update_interactive manual
+      ;;
+    install-hotkey)
+      refresh_shell_integrations
       ;;
     version|--version|-v)
       printf 'sendshot %s\n' "$VERSION"
